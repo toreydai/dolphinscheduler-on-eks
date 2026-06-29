@@ -1,0 +1,61 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: ds-worker-pool
+spec:
+  template:
+    metadata:
+      labels:
+        role: ds-worker
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values:
+            - m5.large
+            - m5.xlarge
+            - m5.2xlarge
+            - m5a.large
+            - m5a.xlarge
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 5m
+  limits:
+    cpu: "80"
+    memory: 160Gi
+---
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  amiFamily: AL2023
+  amiSelectorTerms:
+    - alias: al2023@latest
+  # Karpenter's own default hop limit is 1 (EKS managed nodegroups default to
+  # 2). At 1, a pod's IMDSv2 token PUT never makes it back across the veth
+  # hop from the node's primary ENI, so InstanceProfileCredentialsProvider
+  # (used for the DS S3 resource center — see helm/dolphinscheduler/values.yaml)
+  # gets a 401 on every pod scheduled on a Karpenter node. 2 is what actually
+  # lets pod-level IMDS calls succeed.
+  metadataOptions:
+    httpPutResponseHopLimit: 2
+  role: ""   # replaced by install.sh with node IAM role name
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: ""   # replaced by install.sh with cluster name
+  securityGroupSelectorTerms:
+    - tags:
+        aws:eks:cluster-name: ""     # replaced by install.sh with cluster name
+  tags:
+    ManagedBy: karpenter

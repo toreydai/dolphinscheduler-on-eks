@@ -1,0 +1,183 @@
+# No image override — chart 3.4.2's own default (registry: apache, tag:
+# 3.4.2, separate master/worker/api/alert images) is what's actually
+# consistent; the previous pin here (a single "-standalone-server" image,
+# wrong shape for chart 3.4.2's per-component image fields) was dead config.
+
+master:
+  replicas: 2
+  nodeSelector:
+    karpenter.sh/capacity-type: on-demand
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+  env:
+    JAVA_OPTS: "-Xms512m -Xmx1024m"
+
+worker:
+  replicas: 3
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  # Stock apache/dolphinscheduler-worker:3.4.2 has neither the aws CLI nor
+  # boto3 — every SHELL/PYTHON task in the ETL DAGs needs one or the other
+  # and fails ("aws: command not found" / ModuleNotFoundError) without them.
+  # Verified live end-to-end. No per-component image override exists in this
+  # chart (only a shared image.registry/tag across master/worker/api/alert),
+  # so building/pushing a custom worker image would mean mirroring all 4
+  # other images too just to swap one. Installing into the worker's own
+  # dolphinscheduler-worker-data emptyDir instead — already mounted at
+  # /tmp/dolphinscheduler in the main container (the same path task execution
+  # already happens under) — needs no new volume and no custom image.
+  initContainers:
+    - name: install-aws-tools
+      image: public.ecr.aws/docker/library/python:3.13-slim
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          apt-get update && apt-get install -y --no-install-recommends curl unzip
+          curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          /tmp/aws/install -i /tmp/dolphinscheduler/tools/aws-cli -b /tmp/dolphinscheduler/tools/bin
+          pip install --no-cache-dir --target=/tmp/dolphinscheduler/tools/pylib boto3
+      volumeMounts:
+        - name: dolphinscheduler-worker-data
+          mountPath: /tmp/dolphinscheduler
+  env:
+    JAVA_OPTS: "-Xms1g -Xmx2g"
+    PATH: "/tmp/dolphinscheduler/tools/bin:/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    PYTHONPATH: "/tmp/dolphinscheduler/tools/pylib"
+
+alert:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+
+api:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "300m"
+      memory: "512Mi"
+
+# Disable bundled PostgreSQL — use external Aurora Serverless v2
+postgresql:
+  enabled: false
+
+# Disable bundled MinIO — when minio.enabled is true (chart default) the
+# chart's templates force conf.common's aws.s3.endpoint to the bundled
+# minio's in-cluster address regardless of what's set there, which is why
+# the S3 resource-center fix above had no effect until this was added too.
+minio:
+  enabled: false
+
+# NOTE: chart 3.4.2's externalDatabase has no existingSecret support (verified
+# against the real chart — only plain username/password fields exist). Any
+# real value passed here via --set is snapshotted into the Helm release
+# Secret forever, in plaintext — password is therefore a harmless placeholder
+# ("REPLACE_BY_ESO" per install.sh), never the real Aurora password. The real
+# value is patched into the chart's own generated `{fullname}-externaldb`
+# Secret afterward by k8s/external-secrets/externaldb-secret-patch.yaml
+# (ESO, creationPolicy: Merge — patches only the database-password key,
+# doesn't touch this chart-managed object's ownership), followed by an
+# explicit rollout restart since that Secret is read as an env var at
+# container start, not hot-reloaded. See install_dolphinscheduler() in
+# install.sh for the full sequencing.
+externalDatabase:
+  enabled: true
+  type: postgresql
+  driverClassName: org.postgresql.Driver
+  host: ""           # filled by install.sh via --set
+  port: "5432"
+  username: ""       # filled by install.sh via --set (from ds-aurora-secret; not sensitive)
+  password: ""       # placeholder only — filled by install.sh via --set-string "REPLACE_BY_ESO", real value patched in by ESO post-install
+  database: dolphinscheduler
+  params: "characterEncoding=utf8"
+
+# Bundled ZooKeeper as the registry backend — chart 3.4.2 has no
+# zookeeper-free "embedded registry" option, only zookeeper (default) or
+# external etcd (registryEtcd.enabled). No etcd is provisioned in this
+# project's CDK stacks, so the bundled zookeeper is what registryClient
+# actually connects to.
+zookeeper:
+  enabled: true
+
+# S3 as resource center backend — real schema is conf.common.<dotted-key>
+# (rendered straight into common.properties), not common.configmap.<KEY>. The
+# latter is a real chart path (see common.configmap below) but a different,
+# unrelated mechanism — it renders into the generic dolphinscheduler-common
+# ConfigMap as plain container env vars, which S3StorageOperator never reads;
+# every actual S3 client setting (bucket, region, endpoint, credentials
+# provider) stayed on the chart's own defaults — which point at the bundled
+# minio, in ca-central-1, with static minioadmin/minioadmin creds — until
+# this was moved to conf.common below. Verified against `helm show values`
+# for chart 3.4.2.
+# common.configmap.* is the OTHER real chart path — it renders as plain
+# container env vars into the dolphinscheduler-common ConfigMap, which every
+# PYTHON-type task's generated shell wrapper references directly as
+# ${PYTHON_LAUNCHER}. The chart default (/usr/bin/python/bin/python3) doesn't
+# exist in this image — verified live, a PYTHON task failed with "Permission
+# denied" trying to exec the unexpanded literal path as a command. Real
+# python3 here is /usr/bin/python3 (also verified live).
+common:
+  configmap:
+    PYTHON_LAUNCHER: "/usr/bin/python3"
+
+conf:
+  common:
+    resource.storage.type: "S3"
+    resource.storage.upload.base.path: "/dolphinscheduler"
+    # Key is aws.s3.credentials.provider.type, not aws.credentials.provider.type
+    # — S3StorageOperatorFactory strips the "aws.s3." prefix off every key
+    # under this block before AWSCredentialsProviderFactor reads
+    # "credentials.provider.type" (verified against DS 3.4.2 source: to that
+    # class, region/endpoint/access.key.id are the same map, all "aws.s3."-
+    # prefixed here). And this SDK-v1 InstanceProfileCredentialsProvider only
+    # ever calls the EC2 Instance Metadata Service — it has no IRSA/web-identity
+    # support, so it resolves to the EC2 node's IAM role (ds-aws-eks-node-role),
+    # not any pod-level role. S3 permissions are granted there (EksStack), not
+    # via IRSA.
+    aws.s3.credentials.provider.type: "InstanceProfileCredentialsProvider"
+    # Chart defaults these to the literal string "minioadmin" (non-empty), and
+    # S3StorageOperator builds a static BasicAWSCredentials from them whenever
+    # they're non-empty — regardless of aws.credentials.provider.type. Empty
+    # strings are required to actually fall through to InstanceProfileCredentialsProvider.
+    aws.s3.access.key.id: ""
+    aws.s3.access.key.secret: ""
+    aws.s3.bucket.name: ""   # filled by install.sh via --set
+    aws.s3.region: "us-east-1"
+    aws.s3.endpoint: "https://s3.us-east-1.amazonaws.com"
+
+# Real chart schema is host/path (single values), not hosts[]/ingressClassName
+# — verified against chart 3.4.2, whose ingress.* fields don't match what was
+# assumed here originally. No ACM cert on hand for this demo, so HTTP only.
+# host is intentionally empty (not "dolphinscheduler.local"): that name has no
+# real DNS record, so the ALB's own hostname was the only way anything (the
+# Lambda trigger, curl, a browser) could ever reach this ingress — but a
+# request to the ALB's own hostname carries that hostname as its Host header,
+# which never matched a host-scoped rule and always 404'd. An empty host
+# renders as a host-agnostic rule the chart's ingress.yaml (`- host: "{{ .Values.ingress.host }}"`)
+# accepts any Host header for.
+ingress:
+  enabled: true
+  host: ""
+  path: "/"
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'

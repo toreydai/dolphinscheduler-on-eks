@@ -1,0 +1,21 @@
+{
+  "name": "dolphinscheduler-on-eks",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "cdk": "cdk"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "aws-cdk": "^2.150.0",
+    "typescript": "~5.5"
+  },
+  "dependencies": {
+    "@aws-cdk/lambda-layer-kubectl-v30": "^2.0.4",
+    "aws-cdk-lib": "^2.150.0",
+    "constructs": "^10.3.0"
+  }
+}

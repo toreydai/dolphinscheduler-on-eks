@@ -1,0 +1,1 @@
+# boto3 and urllib are provided by Lambda Python 3.12 runtime

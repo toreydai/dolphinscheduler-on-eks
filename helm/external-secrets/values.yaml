@@ -1,0 +1,29 @@
+installCRDs: true
+
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: ""   # filled by install.sh with ESO IAM role ARN
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "200m"
+    memory: "256Mi"
+
+# System NodeGroup carries CriticalAddonsOnly:NoSchedule and, before Karpenter
+# is up, is the cluster's only capacity — every subchart deployment here needs
+# a matching toleration or its pods stay Pending and `helm --wait` times out.
+tolerations: &tolerations
+  - key: CriticalAddonsOnly
+    operator: Exists
+    effect: NoSchedule
+
+webhook:
+  tolerations: *tolerations
+
+certController:
+  tolerations: *tolerations

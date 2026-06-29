@@ -1,0 +1,23 @@
+# CDK
+cdk.out/
+cdk.context.json
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+
+# Third-party runtime deps for the Deequ quality-check task — binaries, not
+# source, and large enough (deequ jar ~1.5MB) to not belong in git history.
+# Regenerate:
+#   deequ jar:  curl -sSL -o scripts/deequ-2.0.7-spark-3.5.jar \
+#     https://repo1.maven.org/maven2/com/amazon/deequ/deequ/2.0.7-spark-3.5/deequ-2.0.7-spark-3.5.jar
+#   pydeequ.zip: pip download pydeequ==1.6.0 --no-deps -d /tmp/pydeequ_dl && \
+#     cd /tmp/pydeequ_dl && unzip -q '*.whl' -d pkg && \
+#     (cd pkg && zip -qr - pydeequ) > scripts/pydeequ.zip
+# Both need re-uploading to s3://<bucket>/scripts/ after regenerating —
+# see scripts/quality_check.py's --jars/--py-files usage.
+scripts/deequ-*.jar
+scripts/pydeequ.zip

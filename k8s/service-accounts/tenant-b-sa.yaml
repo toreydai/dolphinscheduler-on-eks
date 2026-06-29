@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tenant-b-worker
+  namespace: dolphinscheduler
+  annotations:
+    eks.amazonaws.com/role-arn: ""   # ds-aws-tenant-b-worker-role ARN — set by install.sh
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-b-config
+  namespace: dolphinscheduler
+data:
+  EMR_APP_ID: ""
+  EMR_JOB_ROLE_ARN: ""
+  S3_BUCKET: ""
+  TENANT: "tenant-b"

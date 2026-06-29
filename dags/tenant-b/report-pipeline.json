@@ -1,0 +1,83 @@
+[
+  {
+    "processDefinition": {
+      "code": 0,
+      "name": "tenant-b-report-pipeline",
+      "version": 1,
+      "releaseState": "ONLINE",
+      "description": "Athena 聚合查询 → Redshift 报表写入 → 行数校验",
+      "globalParams": "[]",
+      "timeout": 1800,
+      "tenantCode": "tenant-b",
+      "executionType": "PARALLEL"
+    },
+    "processTaskRelationList": [
+      { "preTaskCode": 0,   "preTaskVersion": 0, "postTaskCode": 100, "postTaskVersion": 1, "conditionType": "NONE" },
+      { "preTaskCode": 100, "preTaskVersion": 1, "postTaskCode": 200, "postTaskVersion": 1, "conditionType": "NONE" },
+      { "preTaskCode": 200, "preTaskVersion": 1, "postTaskCode": 300, "postTaskVersion": 1, "conditionType": "NONE" }
+    ],
+    "taskDefinitionList": [
+      {
+        "code": 100,
+        "name": "athena-daily-aggregation",
+        "version": 1,
+        "description": "Athena 聚合 tenant-b processed 分区数据，输出到 S3 报表路径",
+        "taskType": "SQL",
+        "taskParams": {
+          "type": "QUERY",
+          "datasource": 2,
+          "sql": "SELECT DATE(event_time) AS report_date, COUNT(*) AS total_events, SUM(amount) AS total_amount FROM tenant_b_events WHERE DATE(event_time) = CURRENT_DATE - INTERVAL '1' DAY GROUP BY 1 ORDER BY 1;",
+          "sqlType": "1",
+          "preStatements": [],
+          "postStatements": []
+        },
+        "flag": "YES",
+        "taskPriority": "MEDIUM",
+        "workerGroup": "default",
+        "failRetryTimes": 1,
+        "failRetryInterval": 5,
+        "timeoutFlag": "OPEN",
+        "timeout": 600
+      },
+      {
+        "code": 200,
+        "name": "redshift-insert-report",
+        "version": 1,
+        "description": "将聚合结果写入 Redshift 报表表",
+        "taskType": "SQL",
+        "taskParams": {
+          "type": "NON_QUERY",
+          "datasource": 1,
+          "sql": "INSERT INTO tenant_b_daily_report (report_date, total_events, total_amount, created_at) SELECT CURRENT_DATE - 1, COUNT(*), SUM(amount), SYSDATE FROM tenant_b_events WHERE DATE(created_at) = CURRENT_DATE - 1;",
+          "sqlType": "0"
+        },
+        "flag": "YES",
+        "taskPriority": "MEDIUM",
+        "workerGroup": "default",
+        "failRetryTimes": 1,
+        "failRetryInterval": 3,
+        "timeoutFlag": "OPEN",
+        "timeout": 300
+      },
+      {
+        "code": 300,
+        "name": "validate-report-rows",
+        "version": 1,
+        "description": "校验今日报表行数不为零",
+        "taskType": "SQL",
+        "taskParams": {
+          "type": "NON_QUERY",
+          "datasource": 1,
+          "sql": "DO $$ DECLARE cnt BIGINT; BEGIN SELECT COUNT(*) INTO cnt FROM tenant_b_daily_report WHERE report_date = CURRENT_DATE - 1; IF cnt = 0 THEN RAISE EXCEPTION 'No report rows found for %', CURRENT_DATE - 1; END IF; END $$;",
+          "sqlType": "0"
+        },
+        "flag": "YES",
+        "taskPriority": "LOW",
+        "workerGroup": "default",
+        "failRetryTimes": 0,
+        "timeoutFlag": "CLOSE",
+        "timeout": 60
+      }
+    ]
+  }
+]

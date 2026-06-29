@@ -1,0 +1,136 @@
+[
+  {
+    "processDefinition": {
+      "code": 0,
+      "name": "tenant-a-etl-pipeline",
+      "version": 2,
+      "releaseState": "ONLINE",
+      "description": "S3 raw upload → EMR Serverless ETL → Deequ Quality Check → Redshift COPY → Validate → Glue Crawler",
+      "globalParams": "[]",
+      "timeout": 3600,
+      "tenantCode": "tenant-a",
+      "executionType": "PARALLEL"
+    },
+    "processTaskRelationList": [
+      { "preTaskCode": 0,   "preTaskVersion": 0, "postTaskCode": 100, "postTaskVersion": 1, "conditionType": "NONE" },
+      { "preTaskCode": 100, "preTaskVersion": 1, "postTaskCode": 200, "postTaskVersion": 1, "conditionType": "NONE" },
+      { "preTaskCode": 200, "preTaskVersion": 1, "postTaskCode": 300, "postTaskVersion": 1, "conditionType": "NONE" },
+      { "preTaskCode": 300, "preTaskVersion": 1, "postTaskCode": 400, "postTaskVersion": 1, "conditionType": "NONE" },
+      { "preTaskCode": 400, "preTaskVersion": 1, "postTaskCode": 500, "postTaskVersion": 1, "conditionType": "NONE" },
+      { "preTaskCode": 500, "preTaskVersion": 1, "postTaskCode": 600, "postTaskVersion": 1, "conditionType": "NONE" }
+    ],
+    "taskDefinitionList": [
+      {
+        "code": 100,
+        "name": "check-s3-raw-data",
+        "version": 1,
+        "description": "Verify raw data exists in S3 before triggering ETL",
+        "taskType": "SHELL",
+        "taskParams": {
+          "rawScript": "aws s3 ls s3://${S3_BUCKET}/raw/tenant-a/ | grep -q . || { echo 'No raw data found'; exit 1; }",
+          "resourceList": []
+        },
+        "flag": "YES",
+        "taskPriority": "MEDIUM",
+        "workerGroup": "default",
+        "environmentCode": 179032726829184,
+        "failRetryTimes": 0,
+        "timeoutFlag": "CLOSE",
+        "timeout": 300
+      },
+      {
+        "code": 200,
+        "name": "emr-serverless-spark-etl",
+        "version": 1,
+        "description": "Run Spark ETL on EMR Serverless — clean and transform raw CSV to Parquet",
+        "taskType": "PYTHON",
+        "taskParams": {
+          "rawScript": "import boto3, os, time\n\nclient = boto3.client('emr-serverless')\napp_id  = os.environ['EMR_APP_ID']\nbucket  = os.environ['S3_BUCKET']\n\nresponse = client.start_job_run(\n    applicationId=app_id,\n    executionRoleArn=os.environ['EMR_JOB_ROLE_ARN'],\n    jobDriver={\n        'sparkSubmit': {\n            'entryPoint': f's3://{bucket}/scripts/etl.py',\n            'entryPointArguments': [\n                '--input',  f's3://{bucket}/raw/tenant-a/',\n                '--output', f's3://{bucket}/processed/tenant-a/',\n                '--tenant', 'tenant-a',\n            ],\n            'sparkSubmitParameters': '--conf spark.executor.cores=4 --conf spark.executor.memory=8g --conf spark.dynamicAllocation.enabled=true',\n        }\n    },\n    configurationOverrides={\n        'monitoringConfiguration': {\n            's3MonitoringConfiguration': {'logUri': f's3://{bucket}/logs/emr-serverless/'}\n        }\n    }\n)\n\njob_run_id = response['jobRunId']\nprint(f'Submitted job run: {job_run_id}')\n\nwhile True:\n    run = client.get_job_run(applicationId=app_id, jobRunId=job_run_id)['jobRun']\n    status = run['state']\n    print(f'Status: {status}')\n    if status == 'SUCCESS':\n        break\n    if status in ('FAILED', 'CANCELLED', 'CANCELLING'):\n        raise RuntimeError(f'EMR Serverless job failed: {status} — {run.get(\"stateDetails\", \"\")}')\n    time.sleep(30)\n",
+          "resourceList": []
+        },
+        "flag": "YES",
+        "taskPriority": "MEDIUM",
+        "workerGroup": "default",
+        "environmentCode": 179032726829184,
+        "failRetryTimes": 1,
+        "failRetryInterval": 5,
+        "timeoutFlag": "OPEN",
+        "timeout": 3600
+      },
+      {
+        "code": 300,
+        "name": "deequ-quality-check",
+        "version": 1,
+        "description": "Run PyDeequ quality gate — blocks Redshift load if checks fail",
+        "taskType": "PYTHON",
+        "taskParams": {
+          "rawScript": "import boto3, os, time\n\nclient = boto3.client('emr-serverless')\napp_id  = os.environ['EMR_APP_ID']\nbucket  = os.environ['S3_BUCKET']\n\nresponse = client.start_job_run(\n    applicationId=app_id,\n    executionRoleArn=os.environ['EMR_JOB_ROLE_ARN'],\n    jobDriver={\n        'sparkSubmit': {\n            'entryPoint': f's3://{bucket}/scripts/quality_check.py',\n            'entryPointArguments': [\n                '--input',  f's3://{bucket}/processed/tenant-a/',\n                '--tenant', 'tenant-a',\n                '--report', f's3://{bucket}/dq-reports/tenant-a/',\n            ],\n            'sparkSubmitParameters': f'--jars s3://{bucket}/scripts/deequ-2.0.7-spark-3.5.jar --py-files s3://{bucket}/scripts/pydeequ.zip --conf spark.emr-serverless.driverEnv.SPARK_VERSION=3.5 --conf spark.executorEnv.SPARK_VERSION=3.5',\n        }\n    },\n    configurationOverrides={\n        'monitoringConfiguration': {\n            's3MonitoringConfiguration': {'logUri': f's3://{bucket}/logs/deequ/'}\n        }\n    }\n)\n\njob_run_id = response['jobRunId']\nprint(f'Quality check job run: {job_run_id}')\n\nwhile True:\n    run = client.get_job_run(applicationId=app_id, jobRunId=job_run_id)['jobRun']\n    status = run['state']\n    print(f'Status: {status}')\n    if status == 'SUCCESS':\n        print('Data quality passed')\n        break\n    if status in ('FAILED', 'CANCELLED', 'CANCELLING'):\n        raise RuntimeError(f'DATA QUALITY FAILED — Redshift load blocked. State: {status}')\n    time.sleep(20)\n",
+          "resourceList": []
+        },
+        "flag": "YES",
+        "taskPriority": "HIGH",
+        "workerGroup": "default",
+        "environmentCode": 179032726829184,
+        "failRetryTimes": 0,
+        "timeoutFlag": "OPEN",
+        "timeout": 1800
+      },
+      {
+        "code": 400,
+        "name": "redshift-copy",
+        "version": 1,
+        "description": "COPY processed Parquet from S3 into Redshift via the Redshift Data API (IAM-authenticated, no plaintext credentials)",
+        "taskType": "PYTHON",
+        "taskParams": {
+          "rawScript": "import boto3, os, time\n\nclient = boto3.client('redshift-data', region_name=os.environ.get('AWS_REGION', 'us-east-1'))\nbucket   = os.environ['S3_BUCKET']\nrole_arn = os.environ['REDSHIFT_COPY_ROLE_ARN']\ncluster_id = os.environ.get('REDSHIFT_CLUSTER_ID', 'ds-aws-redshift')\ndatabase   = os.environ.get('REDSHIFT_DATABASE', 'analytics')\ndb_user    = os.environ.get('REDSHIFT_DB_USER', 'dsadmin')\n\nsql = f\"COPY tenant_a_events FROM 's3://{bucket}/processed/tenant-a/' IAM_ROLE '{role_arn}' FORMAT AS PARQUET;\"\n\nresp = client.execute_statement(\n    ClusterIdentifier=cluster_id,\n    Database=database,\n    DbUser=db_user,\n    Sql=sql,\n)\nstmt_id = resp['Id']\nprint(f'Submitted statement: {stmt_id}')\n\nwhile True:\n    desc = client.describe_statement(Id=stmt_id)\n    status = desc['Status']\n    print(f'Status: {status}')\n    if status == 'FINISHED':\n        print(f\"Rows loaded: {desc.get('ResultRows', 'n/a')}\")\n        break\n    if status in ('FAILED', 'ABORTED'):\n        raise RuntimeError(f\"Redshift COPY failed: {desc.get('Error', status)}\")\n    time.sleep(5)\n",
+          "resourceList": []
+        },
+        "flag": "YES",
+        "taskPriority": "MEDIUM",
+        "workerGroup": "default",
+        "environmentCode": 179032726829184,
+        "failRetryTimes": 1,
+        "failRetryInterval": 5,
+        "timeoutFlag": "OPEN",
+        "timeout": 1800
+      },
+      {
+        "code": 500,
+        "name": "validate-row-count",
+        "version": 1,
+        "description": "Alert (non-blocking) if loaded row count deviates > 20% from yesterday",
+        "taskType": "PYTHON",
+        "taskParams": {
+          "rawScript": "import boto3, os, time\n\nclient = boto3.client('redshift-data', region_name=os.environ.get('AWS_REGION', 'us-east-1'))\ncluster_id = os.environ.get('REDSHIFT_CLUSTER_ID', 'ds-aws-redshift')\ndatabase   = os.environ.get('REDSHIFT_DATABASE', 'analytics')\ndb_user    = os.environ.get('REDSHIFT_DB_USER', 'dsadmin')\n\nsql = (\n    \"SELECT today_count, yesterday_count, \"\n    \"CASE WHEN yesterday_count > 0 AND ABS(today_count::FLOAT - yesterday_count) / yesterday_count > 0.2 \"\n    \"THEN 'WARNING: row count delta > 20%' ELSE 'OK' END AS validation_status \"\n    \"FROM (SELECT COUNT(CASE WHEN DATE(created_at) = CURRENT_DATE THEN 1 END) AS today_count, \"\n    \"COUNT(CASE WHEN DATE(created_at) = CURRENT_DATE - 1 THEN 1 END) AS yesterday_count \"\n    \"FROM tenant_a_events) t\"\n)\n\nresp = client.execute_statement(\n    ClusterIdentifier=cluster_id,\n    Database=database,\n    DbUser=db_user,\n    Sql=sql,\n)\nstmt_id = resp['Id']\nprint(f'Submitted statement: {stmt_id}')\n\nwhile True:\n    desc = client.describe_statement(Id=stmt_id)\n    status = desc['Status']\n    if status == 'FINISHED':\n        result = client.get_statement_result(Id=stmt_id)\n        for record in result['Records']:\n            print(f'today={record[0]} yesterday={record[1]} status={record[2]}')\n        break\n    if status in ('FAILED', 'ABORTED'):\n        # Non-blocking per task description — log and move on, don't fail the DAG.\n        print(f\"Row count validation query did not complete: {desc.get('Error', status)}\")\n        break\n    time.sleep(5)\n",
+          "resourceList": []
+        },
+        "flag": "YES",
+        "taskPriority": "LOW",
+        "workerGroup": "default",
+        "environmentCode": 179032726829184,
+        "failRetryTimes": 0,
+        "timeoutFlag": "CLOSE",
+        "timeout": 300
+      },
+      {
+        "code": 600,
+        "name": "glue-crawler-update-catalog",
+        "version": 1,
+        "description": "Trigger Glue Crawler to refresh Data Catalog schema after successful load",
+        "taskType": "PYTHON",
+        "taskParams": {
+          "rawScript": "import boto3, os, time\n\ncrawler_name = os.environ['GLUE_CRAWLER_NAME']\nclient = boto3.client('glue')\n\n# Wait if crawler is already running\nfor _ in range(6):\n    state = client.get_crawler(Name=crawler_name)['Crawler']['State']\n    if state == 'READY':\n        break\n    print(f'Crawler state: {state}, waiting...')\n    time.sleep(10)\n\nclient.start_crawler(Name=crawler_name)\nprint(f'Started crawler: {crawler_name}')\n\n# Wait for completion (async — max 5 min wait)\nfor _ in range(30):\n    state = client.get_crawler(Name=crawler_name)['Crawler']['State']\n    print(f'Crawler state: {state}')\n    if state == 'READY':\n        last_crawl = client.get_crawler(Name=crawler_name)['Crawler'].get('LastCrawl', {})\n        status = last_crawl.get('Status', 'UNKNOWN')\n        print(f'Last crawl status: {status}')\n        if status == 'FAILED':\n            raise RuntimeError(f'Glue Crawler failed: {last_crawl.get(\"ErrorMessage\", \"\")}')\n        break\n    time.sleep(10)\n",
+          "resourceList": []
+        },
+        "flag": "YES",
+        "taskPriority": "LOW",
+        "workerGroup": "default",
+        "environmentCode": 179032726829184,
+        "failRetryTimes": 1,
+        "failRetryInterval": 2,
+        "timeoutFlag": "OPEN",
+        "timeout": 600
+      }
+    ]
+  }
+]

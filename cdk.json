@@ -1,0 +1,26 @@
+{
+  "app": "npx ts-node --prefer-ts-exts bin/app.ts",
+  "watch": {
+    "include": ["**"],
+    "exclude": ["README.md", "cdk*.json", "dist", "node_modules"]
+  },
+  "context": {
+    "projectName": "ds-aws",
+    "tenants": ["tenant-a", "tenant-b"],
+    "s3BucketName": "",
+    "aurora": {
+      "minCapacity": 0.5,
+      "maxCapacity": 16
+    },
+    "eks": {
+      "version": "1.30",
+      "systemNodeType": "m5.large"
+    },
+    "bastionAdminRoleName": "AdminRole",
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/aws-ecs:arnFormatIncludesClusterName": true,
+    "@aws-cdk/core:validateSnapshotRemovalPolicy": true
+  }
+}

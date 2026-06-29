@@ -1,0 +1,93 @@
+name: Sync DAGs to DolphinScheduler
+
+on:
+  push:
+    branches: [main]
+    paths: ["dags/**"]
+  workflow_dispatch:
+    inputs:
+      force_sync_all:
+        description: "Force sync all DAGs (not just changed)"
+        type: boolean
+        default: false
+
+env:
+  DS_API_URL:    ${{ secrets.DS_API_URL }}
+  DS_TOKEN:      ${{ secrets.DS_TOKEN }}
+  DS_PROJECT_ID: ${{ vars.DS_PROJECT_ID }}
+
+jobs:
+  sync:
+    name: Sync changed DAGs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2    # need previous commit to diff
+
+      - name: Determine changed DAG files
+        id: changed
+        run: |
+          if [ "${{ github.event.inputs.force_sync_all }}" = "true" ]; then
+            FILES=$(find dags/ -name "*.json" | tr '\n' ' ')
+          else
+            FILES=$(git diff --name-only HEAD~1 HEAD -- 'dags/*.json' 'dags/**/*.json' | tr '\n' ' ')
+          fi
+          echo "files=${FILES}" >> "$GITHUB_OUTPUT"
+          echo "Changed DAG files: ${FILES}"
+
+      - name: Import DAGs into DolphinScheduler
+        if: steps.changed.outputs.files != ''
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.files }}
+        run: |
+          set -e
+          # DS 3.4.2 dropped the file-based process-definition/import endpoint
+          # entirely (verified against a live 3.4.2 API and its controller/
+          # frontend source — no import/export route exists anywhere). The
+          # replacement is POST .../workflow-definition with the same
+          # taskDefinitionList/processTaskRelationList content as individual
+          # form fields, then a separate release call to take it ONLINE. Also
+          # no /v1 prefix: /dolphinscheduler/v1/* isn't a real route and falls
+          # through to the SPA's index.html (200), so the old check silently
+          # "succeeded" while importing nothing.
+          for FILE in $CHANGED_FILES; do
+            NAME=$(jq -r '.[0].processDefinition.name' "$FILE")
+            echo "Creating workflow '${NAME}' from ${FILE}..."
+
+            CREATE_RESP=$(curl -s -X POST \
+              "${DS_API_URL}/dolphinscheduler/projects/${DS_PROJECT_ID}/workflow-definition" \
+              -H "token: ${DS_TOKEN}" \
+              --data-urlencode "name=${NAME}" \
+              --data-urlencode "description=$(jq -r '.[0].processDefinition.description' "$FILE")" \
+              --data-urlencode "timeout=$(jq -r '.[0].processDefinition.timeout' "$FILE")" \
+              --data-urlencode "executionType=$(jq -r '.[0].processDefinition.executionType' "$FILE")" \
+              --data-urlencode "taskDefinitionJson=$(jq -c '.[0].taskDefinitionList' "$FILE")" \
+              --data-urlencode "taskRelationJson=$(jq -c '.[0].processTaskRelationList' "$FILE")")
+
+            WF_CODE=$(echo "${CREATE_RESP}" | jq -r '.data.code // empty')
+            if [ -z "${WF_CODE}" ]; then
+              echo "FAILED to create ${FILE}:"
+              echo "${CREATE_RESP}"
+              exit 1
+            fi
+
+            RELEASE_RESP=$(curl -s -X POST \
+              "${DS_API_URL}/dolphinscheduler/projects/${DS_PROJECT_ID}/workflow-definition/${WF_CODE}/release" \
+              -H "token: ${DS_TOKEN}" \
+              --data-urlencode "name=${NAME}" \
+              --data-urlencode "releaseState=ONLINE")
+
+            SUCCESS=$(echo "${RELEASE_RESP}" | jq -r '.success')
+            if [ "${SUCCESS}" != "true" ]; then
+              echo "DS API rejected release of ${FILE} (code ${WF_CODE}):"
+              echo "${RELEASE_RESP}"
+              exit 1
+            fi
+
+            echo "Successfully imported ${FILE} (workflow code ${WF_CODE})"
+          done
+
+      - name: No DAGs changed
+        if: steps.changed.outputs.files == ''
+        run: echo "No DAG files changed — nothing to sync"
